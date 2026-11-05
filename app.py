@@ -37,6 +37,8 @@ def is_noise_heading(text):
         r"^(topik terkait|artikel terkait|baca juga|berita terkait|berita lainnya)$",
         r"^(mom'?s life|haibunda|terpopuler|paling banyak dibaca)$",
         r"^(foto|infografis|advertorial)$",
+        r"^(senin|selasa|rabu|kamis|jumat|sabtu|minggu),?\\s+\\d{1,2}\\s+[a-z]+\\s+\\d{4}.*$",
+        r"^.+\\s+\\|\\s*(haibunda|detik|kompas|tempo)$",
         r"^di balik .+ menurut psikologi$",
     ]
     return any(re.search(p, t) for p in patterns)
