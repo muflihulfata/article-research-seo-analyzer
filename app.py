@@ -1,4 +1,5 @@
 import re
+from copy import deepcopy
 from collections import Counter
 from urllib.parse import urlparse, urljoin
 import requests
@@ -13,8 +14,35 @@ STOPWORDS = set("""yang dan di ke dari untuk dengan pada adalah ini itu atau dal
 def clean_text(s):
     return re.sub(r"\s+", " ", s or "").strip()
 
+def is_noise_element(tag):
+    """Deteksi widget non-artikel seperti rekomendasi, navigasi, dan iklan."""
+    marker = " ".join([
+        str(tag.get("id", "")),
+        " ".join(tag.get("class", [])) if isinstance(tag.get("class", []), list) else str(tag.get("class", "")),
+        str(tag.get("aria-label", "")),
+        str(tag.get("role", "")),
+    ]).lower()
+    return bool(re.search(
+        r"related|recommend|popular|trending|breadcrumb|sidebar|advert|ads|"
+        r"newsletter|comment|social|share|tag-list|topic-list|terkait|terpopuler|"
+        r"baca-juga|artikel-lain|most-read|more-stories",
+        marker
+    ))
+
+def is_noise_heading(text):
+    t = clean_text(text).lower()
+    if not t:
+        return True
+    patterns = [
+        r"^(topik terkait|artikel terkait|baca juga|berita terkait|berita lainnya)$",
+        r"^(mom'?s life|haibunda|terpopuler|paling banyak dibaca)$",
+        r"^(foto|infografis|advertorial)$",
+        r"^di balik .+ menurut psikologi$",
+    ]
+    return any(re.search(p, t) for p in patterns)
+
 def fetch_article(url):
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; ArticleResearchSEOAnalyzer/1.0)"}
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; ArticleResearchSEOAnalyzer/1.1)"}
     response = requests.get(url, headers=headers, timeout=25)
     response.raise_for_status()
     if "text/html" not in response.headers.get("Content-Type", "").lower():
@@ -23,34 +51,95 @@ def fetch_article(url):
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript", "svg", "iframe", "form", "nav", "footer", "header", "aside"]):
         tag.decompose()
-    title = clean_text(soup.title.get_text(" ", strip=True)) if soup.title else ""
-    meta_desc = ""
-    md = soup.find("meta", attrs={"name": re.compile("^description$", re.I)})
-    if md:
-        meta_desc = clean_text(md.get("content", ""))
+
+    title_tag = soup.find("meta", property="og:title") or soup.find("title")
+    title = clean_text(title_tag.get("content", "") if title_tag and title_tag.name == "meta" else title_tag.get_text(" ", strip=True) if title_tag else "")
+    md = soup.find("meta", attrs={"name": re.compile("^description$", re.I)}) or soup.find("meta", property="og:description")
+    meta_desc = clean_text(md.get("content", "")) if md else ""
     canonical = soup.find("link", rel="canonical")
     canonical_url = canonical.get("href", "") if canonical else ""
+
+    # Pilih kontainer artikel, bukan seluruh halaman. Salinan dipakai agar
+    # penghapusan widget tidak mengubah dokumen sumber untuk metadata.
+    selectors = [
+        '[itemprop="articleBody"]', "article", "main",
+        '[class*="article-content"]', '[class*="article__content"]',
+        '[class*="detail-content"]', '[class*="content-article"]'
+    ]
+    candidates = []
+    for selector in selectors:
+        try:
+            candidates.extend(soup.select(selector))
+        except Exception:
+            pass
+    candidates = list(dict.fromkeys(candidates))
+    root = max(
+        candidates,
+        key=lambda x: (len(x.find_all("p")) * 100) + len(x.get_text(" ", strip=True)),
+        default=None
+    )
+    article_root = deepcopy(root) if root else None
+
     headings = []
-    for tag in soup.find_all(re.compile("^h[1-6]$")):
-        txt = clean_text(tag.get_text(" ", strip=True))
-        if txt:
-            headings.append((tag.name.upper(), txt))
-    images = soup.find_all("img")
-    image_alts = [clean_text(i.get("alt", "")) for i in images]
+    images = []
+    image_alts = []
     links = []
     host = urlparse(url).netloc.lower()
-    for a in soup.find_all("a", href=True):
-        href = urljoin(url, a["href"])
-        if urlparse(href).scheme in ("http", "https"):
-            links.append((clean_text(a.get_text(" ", strip=True)), href, urlparse(href).netloc.lower() == host))
-    extracted = trafilatura.extract(html, url=url, include_comments=False, include_tables=True, favor_precision=True)
-    if not extracted or len(extracted.strip()) < 120:
-        candidates = soup.find_all(["article", "main"])
-        root = max(candidates, key=lambda x: len(x.get_text(" ", strip=True)), default=soup.body or soup)
-        extracted = root.get_text("\n", strip=True)
-    body = clean_text(extracted)
-    return {"title": title, "description": meta_desc, "canonical": canonical_url, "headings": headings,
-            "body": body, "images": images, "image_alts": image_alts, "links": links, "status": response.status_code}
+
+    if article_root:
+        for node in list(article_root.find_all(True)):
+            if is_noise_element(node):
+                node.decompose()
+        for tag in article_root.find_all(re.compile(r"^h[1-6]$")):
+            txt = clean_text(tag.get_text(" ", strip=True))
+            # Hindari heading rekomendasi/metadata dan heading di widget terkait.
+            if txt and not is_noise_heading(txt) and len(txt) < 180:
+                headings.append((tag.name.upper(), txt))
+        images = article_root.find_all("img")
+        image_alts = [clean_text(i.get("alt", "")) for i in images]
+        for a in article_root.find_all("a", href=True):
+            href = urljoin(url, a["href"])
+            if urlparse(href).scheme in ("http", "https"):
+                links.append((clean_text(a.get_text(" ", strip=True)), href, urlparse(href).netloc.lower() == host))
+
+        # Bangun teks dari paragraf dan subheading di kontainer artikel saja.
+        blocks = []
+        for node in article_root.find_all(["h2", "h3", "h4", "p", "blockquote", "li"]):
+            if any(is_noise_element(parent) for parent in node.parents if parent is not article_root):
+                continue
+            txt = clean_text(node.get_text(" ", strip=True))
+            if not txt or is_noise_heading(txt):
+                continue
+            if node.name == "li" and len(txt.split()) < 4:
+                continue
+            if txt not in blocks:
+                blocks.append(txt)
+        body = "\n\n".join(blocks)
+    else:
+        body = ""
+
+    # Fallback ke Trafilatura jika struktur HTML tidak menyediakan kontainer artikel.
+    if len(body) < 250:
+        extracted = trafilatura.extract(
+            html, url=url, include_comments=False, include_tables=False,
+            favor_recall=True, deduplicate=True
+        )
+        if extracted and len(extracted.strip()) > len(body):
+            body = clean_text(extracted)
+    if not headings:
+        # Jangan mengambil heading global halaman: gunakan heading dari hasil ekstraksi bila tersedia.
+        headings = []
+        if article_root:
+            for tag in article_root.find_all(re.compile(r"^h[1-6]$")):
+                txt = clean_text(tag.get_text(" ", strip=True))
+                if txt and not is_noise_heading(txt):
+                    headings.append((tag.name.upper(), txt))
+
+    return {
+        "title": title, "description": meta_desc, "canonical": canonical_url,
+        "headings": headings, "body": body, "images": images,
+        "image_alts": image_alts, "links": links, "status": response.status_code
+    }
 
 def keywords(text, n=15):
     words = re.findall(r"(?u)\b[\w-]{3,}\b", text.lower())
@@ -135,13 +224,18 @@ if "analysis" in st.session_state:
     st.write("**Canonical:**", d["canonical"] or "Tidak terdeteksi")
     st.markdown("### Inti artikel")
     st.write(body[:1300] + ("..." if len(body)>1300 else ""))
+    if len(body) > 1300:
+        with st.expander("Lihat seluruh teks artikel yang berhasil diekstrak"):
+            st.text(body)
+    st.caption("Pratinjau di atas dibatasi 1.300 karakter untuk tampilan. Buka bagian ini untuk memeriksa teks lengkap hasil ekstraksi.")
     st.markdown("### Search intent (perkiraan)")
     st.write(f"**{intent}.** {intent_reason}")
     st.markdown("### Kata kunci")
     if kw:
         st.dataframe([{"Kata/frasa": k, "Frekuensi": v} for k,v in kw], use_container_width=True, hide_index=True)
-    st.caption("Kata kunci dihitung dari frekuensi kata tunggal; angka ini bukan volume pencarian.")
-    st.markdown("### Struktur heading")
+    st.caption("Kata kunci versi ini masih berupa frekuensi kata tunggal, bukan volume pencarian atau riset keyword kompetitif. Tahap berikutnya adalah peningkatan analisis frasa dan relevansi semantik.")
+    st.markdown("### Struktur heading artikel")
+    st.caption("Heading diambil dari kontainer artikel yang terdeteksi; widget rekomendasi dan topik terkait disaring sejauh dapat dikenali dari struktur HTML situs.")
     if d["headings"]:
         for level, heading in d["headings"]:
             st.write(f"{'　' * (int(level[1])-1)}**{level}** — {heading}")
