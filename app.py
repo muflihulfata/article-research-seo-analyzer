@@ -14,7 +14,7 @@ STOPWORDS = set("""yang dan di ke dari untuk dengan pada adalah ini itu atau dal
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ArticleResearchSEOAnalyzer/2.0)"}
 
 def clean_text(value):
-    return re.sub(r"\\s+", " ", value or "").strip()
+    return re.sub(r"\s+", " ", value or "").strip()
 
 def first_value(values):
     for value in values:
@@ -43,7 +43,7 @@ def best_srcset(value):
     if not candidates:
         return ""
     def rank(item):
-        match = re.match(r"(\\d+(?:\\.\\d+)?)(w|x)", item[1])
+        match = re.match(r"(\d+(?:\.\d+)?)(w|x)", item[1])
         return float(match.group(1)) if match else 1
     return max(candidates, key=rank)[0]
 
@@ -213,7 +213,7 @@ def fetch_article(url):
                 continue
             if txt not in blocks:
                 blocks.append(txt)
-        body = "\\n\\n".join(blocks)
+        body = "\n\n".join(blocks)
 
     if len(body) < 250:
         extracted = trafilatura.extract(html, url=url, include_comments=False, include_tables=False,
@@ -226,22 +226,22 @@ def fetch_article(url):
     }
 
 def keywords(text, n=20):
-    words = re.findall(r"(?u)\\b[\\w-]{3,}\\b", text.lower())
+    words = re.findall(r"(?u)\b[\w-]{3,}\b", text.lower())
     words = [w for w in words if w not in STOPWORDS and not w.isdigit()]
     return Counter(words).most_common(n)
 
 def intent_guess(title, body):
     t = (title + " " + body[:1800]).lower()
-    if re.search(r"\\b(harga|review|terbaik|rekomendasi|vs|perbandingan|beli|produk)\\b", t):
+    if re.search(r"\b(harga|review|terbaik|rekomendasi|vs|perbandingan|beli|produk)\b", t):
         return "Komersial / investigasi komersial"
-    if re.search(r"\\b(cara|tips|tutorial|panduan|langkah|apa itu|mengapa|bagaimana|penelitian)\\b", t):
+    if re.search(r"\b(cara|tips|tutorial|panduan|langkah|apa itu|mengapa|bagaimana|penelitian)\b", t):
         return "Informasional"
-    if re.search(r"\\b(login|masuk|daftar|website resmi|situs resmi)\\b", t):
+    if re.search(r"\b(login|masuk|daftar|website resmi|situs resmi)\b", t):
         return "Navigasional"
     return "Belum dapat dipastikan (kemungkinan informasional)"
 
 def score_article(data):
-    words = re.findall(r"(?u)\\b[\\w-]+\\b", data["body"])
+    words = re.findall(r"(?u)\b[\w-]+\b", data["body"])
     headings = data["headings"]
     checks = [
         ("Judul halaman tersedia", bool(data["title"]), "Tambahkan title yang spesifik."),
@@ -262,7 +262,7 @@ def make_rewriter_prompt(data, analysis):
             f"alt: {img['alt_text'] or 'tidak tersedia'} | caption: {img['caption'] or 'tidak tersedia'} | "
             f"kredit: {img['credit'] or 'tidak tersedia'}"
         )
-    images = "\\n".join(image_lines) if image_lines else "Tidak ada gambar yang berhasil diekstrak."
+    images = "\n".join(image_lines) if image_lines else "Tidak ada gambar yang berhasil diekstrak."
     return f"""Buat artikel baru yang orisinal dan SEO-friendly berdasarkan data berikut. Jangan sekadar memparafrasekan kalimat sumber. Pertahankan fakta yang dapat diverifikasi, jangan mengarang data, dan jelaskan keterbatasan sumber bila relevan.
 
 JUDUL SUMBER: {data['title']}
@@ -320,7 +320,7 @@ if analyze:
 if "analysis_data" in st.session_state:
     d = st.session_state["analysis_data"]
     body = d["body"]
-    word_count = len(re.findall(r"(?u)\\b[\\w-]+\\b", body))
+    word_count = len(re.findall(r"(?u)\b[\w-]+\b", body))
     kw = keywords(body)
     score, checks = score_article(d)
     intent = intent_guess(d["title"], body)
@@ -408,7 +408,7 @@ WORD COUNT: {word_count}
 SEARCH INTENT: {intent}
 
 KEYWORDS:
-""" + "\\n".join(f"- {k}: {v}" for k, v in kw) + "\\n\\nHEADINGS:\\n" + "\\n".join(f"- {a}: {b}" for a, b in d["headings"]) + "\\n\\nIMAGE INVENTORY:\\n" + "\\n".join(f"- {x['image_id']} | {x['image_type']} | {x['image_url']} | alt={x['alt_text']} | caption={x['caption']} | credit={x['credit']}" for x in d["images"]) + "\\n\\nRECOMMENDATIONS:\\n" + "\\n".join("- " + x for x in recommendations) + "\\n\\nARTICLE TEXT:\\n" + body
+""" + "\n".join(f"- {k}: {v}" for k, v in kw) + "\n\nHEADINGS:\n" + "\n".join(f"- {a}: {b}" for a, b in d["headings"]) + "\n\nIMAGE INVENTORY:\n" + "\n".join(f"- {x['image_id']} | {x['image_type']} | {x['image_url']} | alt={x['alt_text']} | caption={x['caption']} | credit={x['credit']}" for x in d["images"]) + "\n\nRECOMMENDATIONS:\n" + "\n".join("- " + x for x in recommendations) + "\n\nARTICLE TEXT:\n" + body
         st.download_button("Unduh laporan Full Analysis", report, file_name="laporan_article_seo.txt", mime="text/plain")
         if d["images"]:
             st.download_button("Unduh inventaris gambar (JSON)", json.dumps(d["images"], ensure_ascii=False, indent=2), file_name="inventaris_gambar.json", mime="application/json")
